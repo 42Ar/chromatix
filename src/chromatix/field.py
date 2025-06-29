@@ -6,20 +6,21 @@ from typing import Any
 import jax.numpy as jnp
 from chex import assert_equal_shape, assert_rank
 from einops import rearrange
-from flax import struct
 from jax import Array
 from typing_extensions import Self
+import dataclasses
 
 from chromatix.typing import ArrayLike, ScalarLike
 
-from .utils.shapes import (
+from chromatix.utils.shapes import (
     _broadcast_1d_to_channels,
     _broadcast_1d_to_grid,
     _broadcast_2d_to_grid,
 )
 
+import equinox as eqx
 
-class Field(struct.PyTreeNode):
+class Field(eqx.Module):
     """
     A container that describes the chromatic light field at a 2D plane.
 
@@ -85,10 +86,13 @@ class Field(struct.PyTreeNode):
     """
 
     u: Array  # (B... H W C [1 | 3])
-    _dx: Array = struct.field(pytree_node=False)  # (2 B... H W C [1 | 3])
-    _spectrum: Array = struct.field(pytree_node=False)  # (B... H W C [1 | 3])
-    _spectral_density: Array = struct.field(pytree_node=False)  # (B... H W C [1 | 3])
-    _origin: Array = struct.field(pytree_node=False)  # (2 B... H W C [1 | 3])
+    _dx: Array  # (2 B... H W C [1 | 3])
+    _spectrum: Array  # (B... H W C [1 | 3])
+    _spectral_density: Array # (B... H W C [1 | 3])
+    _origin: Array  # (2 B... H W C [1 | 3])
+
+    def replace(self, **changes):
+        return dataclasses.replace(self, **changes)
 
     @classmethod
     def empty_like(
