@@ -1,6 +1,5 @@
 from typing import Sequence
 
-import flax.linen as nn
 import jax.numpy as jnp
 import numpy as np
 from einops import rearrange
@@ -75,12 +74,6 @@ def gaussian_kernel(
     x = jnp.mgrid[tuple(slice(-r, r + 1) for r in radius)]
     phi = jnp.exp(-0.5 * jnp.sum((x.T / _sigma) ** 2, axis=-1))  # type: ignore
     return phi / phi.sum()
-
-
-def sigmoid_taper(shape: tuple[int, int], width: float, ndim: int = 5) -> Array:
-    dist = distance_transform_edt(np.pad(np.ones((shape[0] - 2, shape[1] - 2)), 1))
-    taper = 2 * (nn.sigmoid(dist / width) - 0.5)  # type: ignore - it's an array!
-    return _broadcast_2d_to_spatial(taper, ndim)
 
 
 def create_grid(shape: tuple[int, int], spacing: ScalarLike) -> Array:
