@@ -1,94 +1,82 @@
-from __future__ import annotations
-
 from numbers import Number
-from typing import Any
-
+from typing import Any, Self
 import jax.numpy as jnp
 from chex import assert_equal_shape, assert_rank
-from einops import rearrange
 from jax import Array
 from typing_extensions import Self
 import dataclasses
-
 from chromatix.typing import ArrayLike, ScalarLike
-
 from chromatix.utils.shapes import (
     _broadcast_1d_to_channels,
     _broadcast_1d_to_grid,
     _broadcast_2d_to_grid,
 )
-
+from chromatix.utils import create_grid
 import equinox as eqx
+
 
 class Field(eqx.Module):
     """
-    A container that describes the chromatic light field at a 2D plane.
+    Container describing a chromatic light field at a 2D plane.
 
-    ``Field`` objects track various attributes of a complex-valued field (in
-    addition to the field itself for each wavelength): the spacing of the
-    samples along the field, the wavelengths in the spectrum, and the density
-    of the wavelengths. This information can be used, for example, to calculate
-    the intensity of a field at a plane, appropriately weighted by the spectrum.
-    ``Field`` objects also provide various grids for convenience, as well
-    as allow elementwise operations with any broadcastable values, including
-    scalars, arrays, or other ``Field`` objects. These operations include: `+`,
-    `-` (including negation), `*`, `/`, `+=`, `-=`, `*=`, `/=`.
+    ``Field`` objects track attributes of a complex-valued field in addition
+    to the field itself for each wavelength. These include the sample spacing,
+    the wavelengths in the spectrum, and the spectral density. This information
+    can be used, for example, to compute the intensity of a field at a plane,
+    appropriately weighted by the spectrum. ``Field`` objects also provide
+    various coordinate grids for convenience and support elementwise operations
+    with any broadcastable values, including scalars, arrays, or other
+    ``Field`` objects. Supported operations include ``+``, ``-`` (including
+    negation), ``*``, ``/``, and their in-place variants.
 
-    The shape of a ``Field`` object is `(B... H W C [1 | 3])`, where B... is
-    an arbitrary number of batch dimensions, H and W are height and width,
-    and C is the channel dimension, which we use for different wavelengths in
-    the spectrum of a ``Field``. The final dimension has size either 1 for a
-    scalar approximation ``ScalarField`` or 3 for the full vectorial case of
-    ``VectorField``. Any function in Chromatix that deals with ``Field``s can
-    work with either ``ScalarField``s or ``VectorField``s, unless otherwise
-    stated.
+    The shape of a ``Field`` object is ``(B..., H, W, C, [1 | 3])``, where
+    ``B...`` denotes an arbitrary number of batch dimensions, ``H`` and ``W``
+    are the height and width, and ``C`` is the channel dimension corresponding
+    to different wavelengths in the spectrum. The final dimension has size
+    either 1 for the scalar approximation (``ScalarField``) or 3 for the full
+    vectorial case (``VectorField``). Any function in Chromatix that operates on
+    ``Field`` objects can work with both ``ScalarField`` and ``VectorField``
+    instances unless otherwise stated.
 
-    The (potentially more than 1) batch dimensions can be used for any purpose,
-    such as different samples, depth, or time. Any Chromatix functions that
-    produce multiple depths (e.g. propagation to multiple z values) will
-    broadcast to the innermost batch dimension. If more dimensions are required,
-    we encourage the use of ``jax.vmap``, ``jax.pmap``, or a combination of
-    the two. We intend for this to be a compromise between not having too many
-    dimensions when they are not required, and also not having to litter a
-    program with ``jax.vmap`` transformations for common simulations in 3D or 3D
-    over time.
+    Batch dimensions may be used for any purpose, such as different samples,
+    depth values, or time steps. Chromatix functions that produce multiple
+    depths (e.g., propagation to multiple z values) broadcast over the
+    innermost batch dimension. If additional dimensions are required, the use
+    of ``jax.vmap``, ``jax.pmap``, or a combination of the two is encouraged.
+    This design balances flexibility with avoiding excessive explicit
+    vectorization for common 3D or time-dependent simulations.
 
-    Due to this shape, in order to ensure that attributes of ``Field``
-    objects broadcast appropriately, attributes which could be 1D arrays are
-    ensured to have extra singleton dimensions. In order to make the creation
-    of ``Field`` objects more convenient, we provide the class methods
-    ``ScalarField.create()`` and ``VectorField.create()`` (detailed below),
-    which accepts scalar or 1D array arguments for the various attributes
-    (e.g. if a single wavelength is desired, a scalar value can be used, but if
-    multiple wavelengths are desired, a 1D array can be used for the value of
-    ``spectrum``). These methods appropriately reshapes the attributes provided
-    to the correct shapes.
+    To ensure correct broadcasting behavior, attributes that could otherwise
+    be one-dimensional arrays are stored with additional singleton dimensions.
 
-    Attributes:
-        u: The complex field of shape ``(B... H W C [1 | 3])``.
-        _dx: The spacing of the samples in ``u`` discretizing a continuous
-            field. Defined as a 2D array of shape ``(2 C)`` specifying the spacing
-            in the y and x directions respectively (can be the same for y and
-            x for the common case of square pixels). Spacing is the same per
-            wavelength for all entries in a batch. Not intended to be publicly
-            accessed, because the shape of this attribute does not dynamically
-            adapt to the ``ndim`` of the ``Field``. Instead, use the ``dx``
-            property.
-        _spectrum: The wavelengths sampled by the field, in any units specified.
-            Should be a 1D array. Not intended to be publicly accessed, because
-            the shape of this attribute does not dynamically adapt to the
-            ``ndim`` of the ``Field``. Instead, use the ``spectrum`` property.
-        _spectral_density: The weights of the wavelengths in the spectrum.
-            Shouldbe a 1D array of same length as ``_spectrum``. Must sum to
-            1.0. Not intended to be publicly accessed, because the shape of
-            this attribute does not dynamically adapt to the ``ndim`` of the
-            ``Field``. Instead, use the ``spectral_density`` property.
+    For convenience, the class methods ``ScalarField.create()`` and
+    ``VectorField.create()`` are provided.
+
+    Attributes
+    ----------
+    u : jax.Array
+        Complex field of shape ``(B..., H, W, C, [1 | 3])``.
+    _dx : jax.Array
+        Sample spacing of ``u`` discretizing a continuous field. Stored as an
+        array of shape ``(2, C)``, specifying spacing in the y and x directions.
+        Spacing is shared across all batch entries for a given wavelength. This
+        attribute is not intended for public access; use the ``dx`` property
+        instead.
+    _spectrum : jax.Array
+        Wavelengths sampled by the field. Stored as a one-dimensional array.
+        This attribute is not intended for public access; use the
+        ``spectrum`` property instead.
+    _spectral_density : jax.Array
+        Weights associated with anneach wavelength in ``_spectrum``. Stored as a
+        one-dimensional array of the same length as ``_spectrum`` and required
+        to sum to 1.0. This attribute is not intended for public access; use the
+        ``spectral_density`` property instead.
     """
 
     u: Array  # (B... H W C [1 | 3])
-    _dx: Array  # (2 B... H W C [1 | 3])
-    _spectrum: Array  # (B... H W C [1 | 3])
-    _spectral_density: Array # (B... H W C [1 | 3])
+    _dx: Array  # (2 C)
+    _spectrum: Array  # (C)
+    _spectral_density: Array # (C)
     _origin: Array  # (2 B... H W C [1 | 3])
 
     def replace(self, **changes):
@@ -97,13 +85,13 @@ class Field(eqx.Module):
     @classmethod
     def empty_like(
         cls,
-        field: Field,
+        field: Self,
         dx: ScalarLike | None = None,
         shape: tuple[int, int] | None = None,
         spectrum: ScalarLike | None = None,
         spectral_density: ScalarLike | None = None,
         origin: ArrayLike | None = None,
-    ) -> Field:
+    ) -> Self:
         """
         Copy over attributes of ``field`` to a new ``Field`` object, with the
         option of changing some attributes.
@@ -146,37 +134,25 @@ class Field(eqx.Module):
         """
         The grid for each spatial dimension as an array of shape `(2 B... H W
         C 1)`. The 2 entries along the first dimension represent the y and x
-        grids, respectively. This grid assumes that the center of the ``Field``
-        is the origin and that the elements are sampling from the center, not
-        the corner.
+        grids, respectively. This grid assumes that the Fourier center of the
+        ``Field`` is the origin and that the elements are sampling from 
+        center, not the corner.
         """
-        # We must use meshgrid instead of mgrid here in order to be jittable
-        N_y, N_x = self.spatial_shape
-        grid = jnp.meshgrid(
-            jnp.linspace(0, (N_y - 1), N_y) - N_y / 2,
-            jnp.linspace(0, (N_x - 1), N_x) - N_x / 2,
-            indexing="ij",
-        )
-        grid = rearrange(grid, "d h w -> d " + ("1 " * (self.ndim - 4)) + "h w 1 1")
-        return self.dx * grid + self.origin
+        # create grid, than insert batch, channel and vector axes and scale accordingly
+        return create_grid(self.spatial_shape)[:, *[None]*(self.ndim - 4), ..., None, None]*self.dx + self.origin
 
     @property
     def k_grid(self) -> Array:
         """
-        The frequency grid for each spatial dimension as an array of shape `(2
-        B... H W C 1)`. The 2 entries along the first dimension represent the
+        The frequency grid for each spatial dimension as an array of shape
+        `(2 B... H W C 1)`. The 2 entries along the first dimension represent the
         y and x grids, respectively. This grid assumes that the center of the
-        ``Field`` is the origin and that the elements are sampling from the
+        ``Field`` is the Fourier center and that the elements are sampling from the
         center, not the corner.
         """
-        N_y, N_x = self.spatial_shape
-        grid = jnp.meshgrid(
-            jnp.fft.fftshift(jnp.fft.fftfreq(N_y)),
-            jnp.fft.fftshift(jnp.fft.fftfreq(N_x)),
-            indexing="ij",
-        )
-        grid = rearrange(grid, "d h w -> d " + ("1 " * (self.ndim - 4)) + "h w 1 1")
-        return grid / self.dx
+        # create grid, than insert batch, channel and vector axes and scale accordingly
+        return create_grid(self.spatial_shape)[:, *[None]*(self.ndim - 4), ..., None, None]/self.dx
+
 
     @property
     def dx(self) -> Array:
@@ -300,7 +276,7 @@ class Field(eqx.Module):
             float(self.grid[1].max()),
         )
 
-    def __add__(self, other: ScalarLike | ArrayLike | Field) -> Self:
+    def __add__(self, other: ScalarLike | ArrayLike | Self) -> Self:
         if isinstance(other, jnp.ndarray) or isinstance(other, Number):
             return self.replace(u=self.u + other)
         elif isinstance(other, (ScalarField, VectorField)):
@@ -311,7 +287,7 @@ class Field(eqx.Module):
     def __radd__(self, other: Any) -> Self:
         return self + other
 
-    def __sub__(self, other: ScalarLike | ArrayLike | Field) -> Self:
+    def __sub__(self, other: ScalarLike | ArrayLike | Self) -> Self:
         if isinstance(other, jnp.ndarray) or isinstance(other, Number):
             return self.replace(u=self.u - other)
         elif isinstance(other, (ScalarField, VectorField)):
@@ -322,7 +298,7 @@ class Field(eqx.Module):
     def __rsub__(self, other: Any) -> Self:
         return (-1 * self) + other
 
-    def __mul__(self, other: ScalarLike | ArrayLike | Field) -> Self:
+    def __mul__(self, other: ScalarLike | ArrayLike | Self) -> Self:
         if isinstance(other, jnp.ndarray) or isinstance(other, Number):
             return self.replace(u=self.u * other)
         elif isinstance(other, (ScalarField, VectorField)):
@@ -339,7 +315,7 @@ class Field(eqx.Module):
     def __rmatmul__(self, other: ArrayLike) -> Self:
         return self.replace(u=jnp.matmul(other, self.u.squeeze()))
 
-    def __truediv__(self, other: ScalarLike | ArrayLike | Field) -> Self:
+    def __truediv__(self, other: ScalarLike | ArrayLike | Self) -> Self:
         if isinstance(other, jnp.ndarray) or isinstance(other, Number):
             return self.replace(u=self.u / other)
         elif isinstance(other, (ScalarField, VectorField)):
@@ -350,7 +326,7 @@ class Field(eqx.Module):
     def __rtruediv__(self, other: Any) -> Self:
         return self.replace(u=other / self.u)
 
-    def __floordiv__(self, other: ScalarLike | ArrayLike | Field) -> Self:
+    def __floordiv__(self, other: ScalarLike | ArrayLike | Self) -> Self:
         if isinstance(other, jnp.ndarray) or isinstance(other, Number):
             return self.replace(u=self.u // other)
         elif isinstance(other, (ScalarField, VectorField)):
@@ -361,7 +337,7 @@ class Field(eqx.Module):
     def __rfloordiv__(self, other: Any) -> Self:
         return self.replace(u=other // self.u)
 
-    def __mod__(self, other: ScalarLike | ArrayLike | Field) -> Self:
+    def __mod__(self, other: ScalarLike | ArrayLike | Self) -> Self:
         if isinstance(other, jnp.ndarray) or isinstance(other, Number):
             return self.replace(u=self.u % other)
         elif isinstance(other, (ScalarField, VectorField)):

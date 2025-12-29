@@ -1,21 +1,15 @@
-from typing import Sequence
-
+from typing import Sequence, Literal
+from jax import Array
 import jax.numpy as jnp
 import numpy as np
-from einops import rearrange
-from jax import Array
-from scipy.ndimage import distance_transform_edt
-
-from chromatix.typing import ArrayLike, ScalarLike
-
-from .shapes import _broadcast_2d_to_spatial
+from numpy.typing import ArrayLike
 
 
 def next_order(val: int) -> int:
     return int(2 ** np.ceil(np.log2(val)))
 
 
-def center_pad(u: ArrayLike, padding: Sequence[int], cval: float = 0) -> Array:
+def center_pad(u: Array, padding: Sequence[int], cval: float = 0) -> Array:
     """
     Symmetrically pads ``u`` with lengths specified per axis in ``padding``,
     which should be an iterable of integers and have the same length as
@@ -76,38 +70,58 @@ def gaussian_kernel(
     return phi / phi.sum()
 
 
-def create_grid(shape: tuple[int, int], spacing: ScalarLike) -> Array:
+def create_grid(shape: tuple[int, int], spacing: ArrayLike = 1,
+        center: ArrayLike | Literal["Fourier"] = "Fourier") -> Array:
     """
-    Creates a 2D grid of vertical and horizontal coordinates with the specified
-    ``shape`` and ``spacing``, with the origin in the center of the grid.
+    Create 2D grid(s) of x and y coordinates.
 
-    Args:
-        shape: The shape of the grid, described as a tuple of
-            integers of the form ``(H W)``.
-        spacing: The spacing of each pixel in the grid, either a single float
-            for square pixels or an array of shape `(2 1)` for non-square
-            pixels.
-    Returns:
-        The grid as an array of shape ``(2 H W)``.
+    Parameters
+    ----------
+    shape : tuple[int, int]
+        Shape of the grid as ``(H, W)``.
+    spacing : ArrayLike, optional
+        Spacing of each pixel. Either a single scalar for square pixels
+        or an ArrayLike of shape ``(2, ...)`` for arbitrary pixels. If the
+        array has more then one dimension, multiple grids are returned
+        accordingly. Axes of size 1 are inserted from the right to match the
+        number of dimensions of `center` if necessary.
+    center : ArrayLike or {"Fourier"}, optional
+        Center of the grid. If Fourier, the Fourier center which is
+        equal to ``shape//2`` will be used. If an ArrayLike of shape ``(2, ...)``,
+        it defines the index of the center pixel, where ``center[0]``
+        and ``center[1]`` are the y- and x coordinates, respectively.
+        If the array has more then one dimension, multiple grids are returned
+        accordingly. Axes of size 1 are inserted from the right to match the
+        number of dimensions of `spacing` if necessary.
+
+    Returns
+    -------
+    jnp.Array
+        Grid of shape ``(2, H, W, ...)``, where the first component contains
+        y-coordinates (row index) and the second the x-coordinates (column
+        index). The dtype is integer if ``spacing`` and ``center`` has
+        integer dtype.
     """
-    half_size = jnp.array(shape) / 2
-    spacing = jnp.atleast_1d(spacing)
-    if spacing.size == 1:
-        spacing = jnp.concatenate([spacing, spacing])
-    assert spacing.size == 2, "Spacing must be either single float or have shape (2,)"
-    spacing = rearrange(spacing, "d -> d 1 1", d=2)
-    # @copypaste(Field): We must use meshgrid instead of mgrid here
-    # in order to be jittable
-    grid = jnp.meshgrid(
-        jnp.linspace(-half_size[0], half_size[0] - 1, num=shape[0]) + 0.5,
-        jnp.linspace(-half_size[1], half_size[1] - 1, num=shape[1]) + 0.5,
-        indexing="ij",
-    )
-    grid = spacing * jnp.array(grid)
-    return grid
+    if center == "Fourier":
+        center = jnp.array(shape) // 2
+    center = jnp.array(center)
+    if center.shape[0] != 2:
+        raise ValueError("the first axis of the center parameter must have size 2")
+    spacing = jnp.array(spacing)
+    if spacing.ndim == 0:
+        spacing = jnp.full(2, spacing)
+    elif spacing.shape[0] != 2:
+        raise ValueError("the first axis of the spacing parameter must have size 2")
+    channel_axes = max(center.ndim, spacing.ndim) - 1
+    spacing = spacing[..., *[None]*(channel_axes - spacing.ndim + 3)]  # shape (2, ..., 1, 1)
+    center = center[..., *[None]*(channel_axes - center.ndim + 3)]  # shape (2, ..., 1, 1)
+    # in order to be jittable, meshgrid instead of mgrid must be used
+    integer_grid = jnp.array(jnp.meshgrid(jnp.arange(shape[0]), jnp.arange(shape[1]), indexing="ij"))[:, *[None]*channel_axes, ...]  # shape (2, ..., H, W)
+    grid = spacing*(integer_grid - center)  # shape (2, ..., H, W)
+    return jnp.moveaxis(grid, (-2, -1), (1, 2))
 
 
-def rotate_grid(grid: Array, rotation: ScalarLike) -> Array:
+def rotate_grid(grid: Array, rotation) -> Array:
     """
     Rotates a 2D grid (an array of shape ``(2 H W)``) by ``rotation`` radians.
     Positive rotations are assumed to be in the counter-clockwise direction.
@@ -122,9 +136,7 @@ def rotate_grid(grid: Array, rotation: ScalarLike) -> Array:
     return grid
 
 
-def grid_spatial_to_pupil(
-    grid: Array, f: ScalarLike, NA: ScalarLike, n: ScalarLike
-) -> Array:
+def grid_spatial_to_pupil(grid: Array, f, NA, n) -> Array:
     R = f * NA / n  # pupil radius
     return grid / R
 
