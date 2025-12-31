@@ -115,7 +115,7 @@ def thin_prism(
 ) -> Field:
     phase = linear_phase(
         field.spatial_shape,
-        field._dx[0, 0],
+        field._dx[0, 0, 0],
         field.spectrum[..., 0, 0].squeeze(),
         n_prism,
         max_thickness,
@@ -136,7 +136,7 @@ def sawtooth_grating(
 ) -> Field:
     phase = sawtooth_phase(
         field.spatial_shape,
-        field._dx[0, 0],
+        field._dx[0, 0, 0],
         field.spectrum[..., 0, 0].squeeze(),
         n_grating,
         period,
@@ -158,7 +158,7 @@ def sinusoid_grating(
 ) -> Field:
     phase = sinusoid_phase(
         field.spatial_shape,
-        field._dx[0, 0],
+        field._dx[0, 0, 0],
         field.spectrum[..., 0, 0].squeeze(),
         n_grating,
         period,
@@ -178,7 +178,7 @@ def axicon(
 ) -> Field:
     phase = axicon_phase(
         field.spatial_shape,
-        field._dx[0, 0],
+        field._dx[0, 0, 0],
         field.spectrum[..., 0, 0].squeeze(),
         n_axicon,
         slope_angle,

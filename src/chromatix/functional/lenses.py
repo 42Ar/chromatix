@@ -131,7 +131,7 @@ def high_na_ff_lens(
         create = VectorField.create
 
     if output_dx is None:
-        output_dx = field._dx
+        output_dx = field._dx[:-1]
 
     if output_shape is None:
         output_shape = field.spatial_shape
@@ -208,7 +208,7 @@ def microlens_array(
 ) -> Field:
     amplitude, phase = microlens_array_amplitude_and_phase(
         field.spatial_shape,
-        field._dx[0, 0],
+        field._dx[0, 0, 0],
         field.spectrum[..., 0, 0].squeeze(),
         n,
         fs,
@@ -232,7 +232,7 @@ def hexagonal_microlens_array(
 ) -> Field:
     amplitude, phase = hexagonal_microlens_array_amplitude_and_phase(
         field.spatial_shape,
-        field._dx[0, 0],
+        field._dx[0, 0, 0],
         field.spectrum[..., 0, 0].squeeze(),
         n,
         f,
@@ -258,7 +258,7 @@ def rectangular_microlens_array(
 ) -> Field:
     amplitude, phase = rectangular_microlens_array_amplitude_and_phase(
         field.spatial_shape,
-        field._dx[0, 0],
+        field._dx[0, 0, 0],
         field.spectrum[..., 0, 0].squeeze(),
         n,
         f,

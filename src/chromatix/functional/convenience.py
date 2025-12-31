@@ -1,8 +1,9 @@
 import jax.numpy as jnp
+from numpy import ndarray
 
 from chromatix.field import Field
 from chromatix.typing import ScalarLike
-from chromatix.utils import _squeeze_grid_to_2d
+from chromatix.utils import _squeeze_grid_to_3d
 from chromatix.utils.fft import fft
 
 
@@ -42,4 +43,4 @@ def optical_fft(field: Field, z: ScalarLike, n: ScalarLike) -> Field:
     fft_input = (norm_fft * field.u) + (norm_ifft * field.conj.u)
     fft_output = fft(fft_input, axes=field.spatial_dims, shift=True)
     u = (z >= 0) * fft_output + (z < 0) * jnp.conj(fft_output)
-    return field.replace(u=u, _dx=_squeeze_grid_to_2d(du, field.ndim))
+    return field.replace(u=u, _dx=_squeeze_grid_to_3d(du, field.ndim))

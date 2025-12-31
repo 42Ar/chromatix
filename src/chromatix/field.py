@@ -1,33 +1,217 @@
-from numbers import Number
-from typing import Any, Self
-import jax.numpy as jnp
-from chex import assert_equal_shape, assert_rank
-from jax import Array
-from typing_extensions import Self
 import dataclasses
-from chromatix.typing import ArrayLike, ScalarLike
+import operator
+from typing import Self, override
+from jax import Array
+from jax._src.lax.control_flow.solves import _check_shapes
+from jax.typing import ArrayLike as JaxArrayLike
+import jax.numpy as jnp
+import numpy as np
+from numpy.typing import ArrayLike
+from chex import assert_equal_shape, assert_rank
 from chromatix.utils.shapes import (
     _broadcast_1d_to_channels,
     _broadcast_1d_to_grid,
     _broadcast_2d_to_grid,
 )
-from chromatix.utils import create_grid
+from chromatix.utils import create_grid, toarray
 import equinox as eqx
 
 
-class Field(eqx.Module):
+class Raster(eqx.Module):
+    """
+    Represents a quantity that is sampled on an evenly spaced grid of
+    size ``(H, W)``. 
+    
+    The quantity is stored in the array ``u`` of shape ``(B... H W C...)``
+    where ``B...`` are called batch axes and ``C...`` are called channel
+    axes. The array ``_dx`` is of shape ``(2, D...)`` and stores the
+    sample spacing, where ``_dx[0]`` is the spacing in y direction
+    (corresponds to ``H``) and ``_dx[1]`` is the spacing in x-direction
+    (corresponds to ``W``). The shape of ``C...`` must be equal to ``D...``
+    except that some axes can have length 1 in ``D...`` even if the
+    corresponding axes in ``C...`` has not length 1. This allows for
+    simplified broadcasting. 
+
+    Notes
+    -----
+    The array ``_dx`` is can also be a numpy array, to enable certain
+    precomputations (like Pupil masks) and assertions during compile time
+    of jax. 
+    """
+
+    u: Array  # (B... H W C...)
+    _dx: Array | np.ndarray  # (2 D...)
+
+    def _check_shapes(self):
+        if self.ndim < 2:
+            raise ValueError("cannot construct a Raster object with less than two dimensions")
+        if self.n_batch_dims < 0:
+            raise ValueError("attempted to construct a raster with invalid "
+                    f"number of axes in u or _dx (u.shape={self.u.shape}, _dx.shape={self._dx.shape})")
+        if self._dx.shape[0] != 2:
+            raise ValueError("the first axis of _dx must have size 2, but _dx has "
+                    f"shape {self._dx.shape}")
+        if not all((sc == 1 or sc == su) for sc, su in zip(self._dx.shape[1:], self.channel_shape)):
+            raise ValueError("the channel shape of _dx is incompatible with the channel "
+                    f"shape of u (u.shape={self.u.shape}, _dx.shape={self._dx.shape})")
+
+    def __post_init__(self):
+        self._check_shapes()
+
+    def replace(self, **changes):
+        result = dataclasses.replace(self, **changes)
+        result._check_shapes()
+        return result
+    
+    @property
+    def ndim(self) -> int:
+        """Total number of axes of the data array"""
+        return self.u.ndim
+    
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Shape of the complex field."""
+        return self.u.shape
+
+    @property
+    def n_channel_dims(self) -> int:
+        """Number of channel axes"""
+        return self._dx.ndim - 1
+
+    @property
+    def channel_shape(self) -> tuple[int, ...]:
+        """Shape of the batch axes"""
+        return self.shape[self.ndim - self.n_channel_dims:]
+    
+    @property
+    def n_batch_dims(self) -> int:
+        """Number of batch axes"""
+        return self.ndim - self._dx.ndim - 1
+
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        """Shape of the batch axes"""
+        return self.shape[:self.n_batch_dims]
+
+    @property
+    def spatial_dims(self) -> tuple[int, int]:
+        """Indices of the height (y) and width (x) axes of self.u"""
+        return (self.n_batch_dims, self.n_batch_dims + 1)
+
+    @property
+    def spatial_shape(self) -> tuple[int, int]:
+        """Returns the spatial size as a tuple ``(height, width)``"""
+        return (self.u.shape[self.spatial_dims[0]], self.u.shape[self.spatial_dims[1]])
+
+    def __neg__(self):
+        return self.replace(u=-self.u)
+
+    def _binary_op(self, operator, other: JaxArrayLike | Self, reverse: bool) -> Self:
+        if isinstance(other, Raster):
+            other = other.u
+        elif not isinstance(other, (np.ndarray, Array, np.bool_, np.number, bool, int, float, complex)):
+            return NotImplemented
+        if reverse:
+            res = operator(other, self.u)
+        else:
+            res = operator(self.u, other)            
+        return self.replace(u=res)
+        
+    def __add__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.add, other, False)
+
+    def __radd__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.add, other, True)
+
+    def __sub__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.sub, other, False)
+
+    def __rsub__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.sub, other, True)
+
+    def __mul__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.mul, other, False)
+
+    def __rmul__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.mul, other, True)
+
+    def __truediv__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.truediv, other, False)
+
+    def __rtruediv__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.truediv, other, True)
+
+    def __floordiv__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.floordiv, other, False)
+
+    def __rfloordiv__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.floordiv, other, True)
+
+    def __mod__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.mod, other, False)
+
+    def __rmod__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.mod, other, True)
+
+    def __pow__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.pow, other, False)
+
+    def __rpow__(self, other: JaxArrayLike | Self) -> Self:
+        return self._binary_op(operator.pow, other, True)
+
+    @property
+    def conj(self) -> Self:
+        return self.replace(u=jnp.conj(self.u))
+
+    @property
+    def dx(self) -> Array | np.ndarray:
+        """
+        Returns the sample spacing as a numpy array of shape
+        ``(2, B..., 1, 1, D...)``, where ones are inserted for
+        the batch axes.
+        """
+        return self._dx[:, *[None]*(self.n_batch_dims + 2)]
+
+    @property
+    def _dk(self) -> Array | np.ndarray:
+        """
+        Analog of ``_dx`` in Fourier space, the returned array has shape ``(2, D...)``.
+        """
+        xp = self._dx.__array_namespace__()
+        return 1.0/(self._dx*xp.array(self.spatial_shape)[:, *[None]*self.n_channel_dims])
+
+    @property
+    def dk(self) -> Array | np.ndarray:
+        """
+        Returns the k-space sample spacing as a numpy array
+        of shape ``(2, B..., 1, 1, D...)``, where ones are
+        inserted for the batch axes.
+        """
+        return self._dk[:, *[None]*(self.n_batch_dims + 2)]
+
+    @property
+    def grid(self) -> Array:
+        """
+        The grid of pixel coordinates as an array of shape ``(2 B... H W D...)``,
+        where ones are inserted for the batch axes. The 2 entries along the first
+        dimension represent the y and x grids, respectively. The returned grid
+        is Fourier centered.
+        """
+        return create_grid(self.spatial_shape, spacing=self._dx)[:, *[None]*self.n_batch_dims]
+
+    @property
+    def k_grid(self) -> Array:
+        """
+        The frequency grid (without factor 2*pi) as an array of shape ``(2 B... H W D...)``,
+        where ones are inserted for the batch axes. The 2 entries along the first dimension
+        represent the k_y and k_x grids, respectively. The returned grid is Fourier centered.
+        """
+        return create_grid(self.spatial_shape, spacing=self._dk)[:, *[None]*self.n_batch_dims]
+
+
+class Field(Raster):
     """
     Container describing a chromatic light field at a 2D plane.
-
-    ``Field`` objects track attributes of a complex-valued field in addition
-    to the field itself for each wavelength. These include the sample spacing,
-    the wavelengths in the spectrum, and the spectral density. This information
-    can be used, for example, to compute the intensity of a field at a plane,
-    appropriately weighted by the spectrum. ``Field`` objects also provide
-    various coordinate grids for convenience and support elementwise operations
-    with any broadcastable values, including scalars, arrays, or other
-    ``Field`` objects. Supported operations include ``+``, ``-`` (including
-    negation), ``*``, ``/``, and their in-place variants.
 
     The shape of a ``Field`` object is ``(B..., H, W, C, [1 | 3])``, where
     ``B...`` denotes an arbitrary number of batch dimensions, ``H`` and ``W``
@@ -38,14 +222,6 @@ class Field(eqx.Module):
     ``Field`` objects can work with both ``ScalarField`` and ``VectorField``
     instances unless otherwise stated.
 
-    Batch dimensions may be used for any purpose, such as different samples,
-    depth values, or time steps. Chromatix functions that produce multiple
-    depths (e.g., propagation to multiple z values) broadcast over the
-    innermost batch dimension. If additional dimensions are required, the use
-    of ``jax.vmap``, ``jax.pmap``, or a combination of the two is encouraged.
-    This design balances flexibility with avoiding excessive explicit
-    vectorization for common 3D or time-dependent simulations.
-
     To ensure correct broadcasting behavior, attributes that could otherwise
     be one-dimensional arrays are stored with additional singleton dimensions.
 
@@ -54,43 +230,39 @@ class Field(eqx.Module):
 
     Attributes
     ----------
-    u : jax.Array
-        Complex field of shape ``(B..., H, W, C, [1 | 3])``.
-    _dx : jax.Array
-        Sample spacing of ``u`` discretizing a continuous field. Stored as an
-        array of shape ``(2, C)``, specifying spacing in the y and x directions.
-        Spacing is shared across all batch entries for a given wavelength. This
-        attribute is not intended for public access; use the ``dx`` property
-        instead.
     _spectrum : jax.Array
-        Wavelengths sampled by the field. Stored as a one-dimensional array.
-        This attribute is not intended for public access; use the
-        ``spectrum`` property instead.
+        Array of shape ``(C,)`` that stores the wavelengths of the field.
     _spectral_density : jax.Array
-        Weights associated with anneach wavelength in ``_spectrum``. Stored as a
-        one-dimensional array of the same length as ``_spectrum`` and required
-        to sum to 1.0. This attribute is not intended for public access; use the
-        ``spectral_density`` property instead.
+        Weights associated with the wavelength in ``_spectrum``. Stored as
+        an array of shape ``(C,)``.
     """
 
-    u: Array  # (B... H W C [1 | 3])
-    _dx: Array  # (2 C)
-    _spectrum: Array  # (C)
-    _spectral_density: Array # (C)
-    _origin: Array  # (2 B... H W C [1 | 3])
+    _spectrum: Array | np.ndarray  # (C)
+    _spectral_density: Array | np.ndarray # (C)
+    _origin: Array | np.ndarray  # (2 B... H W C [1 | 3])
 
-    def replace(self, **changes):
-        return dataclasses.replace(self, **changes)
+    @classmethod
+    def _normalize_dx(self, dx: ArrayLike) -> Array | np.ndarray:
+        _dx = toarray(dx)
+        xp = _dx.__array_namespace__()
+        if _dx.ndim == 0:
+            _dx = xp.full(2, _dx)
+        if _dx.ndim == 1:
+            _dx = _dx[..., None]  # add channel dim
+        if _dx.ndim == 2:
+            _dx = _dx[..., None]  # add vector dim
+        if _dx.shape != (2, 1, 1):
+            raise ValueError("unexpected shape of dx")
+        return _dx
 
     @classmethod
     def empty_like(
         cls,
         field: Self,
-        dx: ScalarLike | None = None,
+        dx: ArrayLike | None = None,
         shape: tuple[int, int] | None = None,
-        spectrum: ScalarLike | None = None,
-        spectral_density: ScalarLike | None = None,
-        origin: ArrayLike | None = None,
+        spectrum: ArrayLike | None = None,
+        spectral_density: ArrayLike | None = None,
     ) -> Self:
         """
         Copy over attributes of ``field`` to a new ``Field`` object, with the
@@ -99,11 +271,9 @@ class Field(eqx.Module):
         Note that this function overwrites the field `u` with a new empty field.
         """
         if dx is None:
-            dx = field.dx
+            _dx = field._dx
         else:
-            if dx.ndim == 1:
-                dx = jnp.stack([dx, dx])
-            assert_rank(dx, 2)  # dx should have shape (2, C) here
+            _dx = cls._normalize_dx(dx)
         if shape is None:
             shape = field.spatial_shape
         else:
@@ -127,43 +297,13 @@ class Field(eqx.Module):
         u = jnp.empty(
             (1, *shape, spectrum.size, field.u.shape[-1]), dtype=field.u.dtype
         )
-        return cls(u, dx, spectrum, spectral_density, origin)
+        return cls(u, _dx, spectrum, spectral_density, origin)
 
-    @property
-    def grid(self) -> Array:
-        """
-        The grid for each spatial dimension as an array of shape `(2 B... H W
-        C 1)`. The 2 entries along the first dimension represent the y and x
-        grids, respectively. This grid assumes that the Fourier center of the
-        ``Field`` is the origin and that the elements are sampling from 
-        center, not the corner.
-        """
-        # create grid, than insert batch, channel and vector axes and scale accordingly
-        return create_grid(self.spatial_shape)[:, *[None]*(self.ndim - 4), ..., None, None]*self.dx + self.origin
-
-    @property
-    def k_grid(self) -> Array:
-        """
-        The frequency grid for each spatial dimension as an array of shape
-        `(2 B... H W C 1)`. The 2 entries along the first dimension represent the
-        y and x grids, respectively. This grid assumes that the center of the
-        ``Field`` is the Fourier center and that the elements are sampling from the
-        center, not the corner.
-        """
-        # create grid, than insert batch, channel and vector axes and scale accordingly
-        return create_grid(self.spatial_shape)[:, *[None]*(self.ndim - 4), ..., None, None]/self.dx
-
-
-    @property
-    def dx(self) -> Array:
-        """
-        The spacing of the samples in ``u`` discretizing a continuous field.
-        Defined as an array of shape ``(2 1... 1 1 C 1)`` specifying the spacing
-        in the y and x directions respectively (can be the same for y and x for
-        the common case of square pixels). Spacing is the same per wavelength
-        for all entries in a batch.
-        """
-        return _broadcast_2d_to_grid(self._dx, self.ndim)
+    @override
+    def _check_shapes(self):
+        super()._check_shapes()
+        if self._dx.shape not in [(2, 1, 1), (2, self.u.shape[-2], 1)]:
+            raise ValueError(f"_dx has invalid shape for a Field (is {self._dx.shape})")
 
     @property
     def origin(self) -> Array:
@@ -173,19 +313,6 @@ class Field(eqx.Module):
         specifying the shift in the y and x directions respectively.
         """
         return _broadcast_2d_to_grid(self._origin, self.ndim)
-
-    @property
-    def dk(self) -> Array:
-        """
-        The frequency spacing of the samples in the frequency space of ``u``.
-        Defined as an array of shape ``(2 1... 1 1 C 1)`` specifying the spacing
-        in the y and x directions respectively (can be the same for y and x for
-        the common case of square pixels). Spacing is the same per wavelength
-        for all entries in a batch.
-        """
-        shape = jnp.array(self.spatial_shape)
-        shape = _broadcast_1d_to_grid(shape, self.ndim)
-        return 1 / (self.dx * shape)
 
     @property
     def extent(self) -> Array:
@@ -242,31 +369,6 @@ class Field(eqx.Module):
         return jnp.sum(self.intensity, axis=(-4, -3), keepdims=True) * area
 
     @property
-    def shape(self) -> tuple[int, ...]:
-        """Shape of the complex field."""
-        return self.u.shape
-
-    @property
-    def spatial_shape(self) -> tuple[int, int]:
-        """Only the height and width of the complex field."""
-        return (self.u.shape[self.spatial_dims[0]], self.u.shape[self.spatial_dims[1]])
-
-    @property
-    def spatial_dims(self) -> tuple[int, int]:
-        """Dimensions representing the height and width of the complex field."""
-        return (-4, -3)
-
-    @property
-    def ndim(self) -> int:
-        """Number of dimensions (the rank) of the complex field."""
-        return self.u.ndim
-
-    @property
-    def conj(self) -> Self:
-        """conjugate of the complex field, as a field of the same shape."""
-        return self.replace(u=jnp.conj(self.u))
-
-    @property
     def spatial_limits(self) -> tuple[tuple[float, float], tuple[float, float]]:
         """
         Return the spatial limits of the field: (y_min, y_max), (x_min, x_max).
@@ -276,93 +378,16 @@ class Field(eqx.Module):
             float(self.grid[1].max()),
         )
 
-    def __add__(self, other: ScalarLike | ArrayLike | Self) -> Self:
-        if isinstance(other, jnp.ndarray) or isinstance(other, Number):
-            return self.replace(u=self.u + other)
-        elif isinstance(other, (ScalarField, VectorField)):
-            return self.replace(u=self.u + other.u)
-        else:
-            return NotImplemented
-
-    def __radd__(self, other: Any) -> Self:
-        return self + other
-
-    def __sub__(self, other: ScalarLike | ArrayLike | Self) -> Self:
-        if isinstance(other, jnp.ndarray) or isinstance(other, Number):
-            return self.replace(u=self.u - other)
-        elif isinstance(other, (ScalarField, VectorField)):
-            return self.replace(u=self.u - other.u)
-        else:
-            return NotImplemented
-
-    def __rsub__(self, other: Any) -> Self:
-        return (-1 * self) + other
-
-    def __mul__(self, other: ScalarLike | ArrayLike | Self) -> Self:
-        if isinstance(other, jnp.ndarray) or isinstance(other, Number):
-            return self.replace(u=self.u * other)
-        elif isinstance(other, (ScalarField, VectorField)):
-            return self.replace(u=self.u * other.u)
-        else:
-            return NotImplemented
-
-    def __rmul__(self, other: Any) -> Self:
-        return self * other
-
-    def __matmul__(self, other: ArrayLike) -> Self:
-        return self.replace(u=jnp.matmul(self.u, other))
-
-    def __rmatmul__(self, other: ArrayLike) -> Self:
-        return self.replace(u=jnp.matmul(other, self.u.squeeze()))
-
-    def __truediv__(self, other: ScalarLike | ArrayLike | Self) -> Self:
-        if isinstance(other, jnp.ndarray) or isinstance(other, Number):
-            return self.replace(u=self.u / other)
-        elif isinstance(other, (ScalarField, VectorField)):
-            return self.replace(u=self.u / other.u)
-        else:
-            return NotImplemented
-
-    def __rtruediv__(self, other: Any) -> Self:
-        return self.replace(u=other / self.u)
-
-    def __floordiv__(self, other: ScalarLike | ArrayLike | Self) -> Self:
-        if isinstance(other, jnp.ndarray) or isinstance(other, Number):
-            return self.replace(u=self.u // other)
-        elif isinstance(other, (ScalarField, VectorField)):
-            return self.replace(u=self.u // other.u)
-        else:
-            return NotImplemented
-
-    def __rfloordiv__(self, other: Any) -> Self:
-        return self.replace(u=other // self.u)
-
-    def __mod__(self, other: ScalarLike | ArrayLike | Self) -> Self:
-        if isinstance(other, jnp.ndarray) or isinstance(other, Number):
-            return self.replace(u=self.u % other)
-        elif isinstance(other, (ScalarField, VectorField)):
-            return self.replace(u=self.u % other.u)
-        else:
-            return NotImplemented
-
-    def __rmod__(self, other: Any) -> Self:
-        return self.replace(u=other % self.u)
-
-    def __pow__(self, other: Any) -> Self:
-        return self.replace(u=self.u**other)
-
-    def __rpow__(self, other: Any) -> Self:
-        return self.replace(u=other**self.u)
-
 
 class ScalarField(Field):
+
     @classmethod
     def create(
         cls,
-        dx: ScalarLike,
-        spectrum: ScalarLike,
-        spectral_density: ScalarLike,
-        u: Array | None = None,
+        dx: ArrayLike,
+        spectrum: ArrayLike,
+        spectral_density: ArrayLike,
+        u: ArrayLike | None = None,
         shape: tuple[int, int] | None = None,
         origin: ArrayLike | None = None,
     ) -> Self:
@@ -401,10 +426,7 @@ class ScalarField(Field):
                 that is is no longer centered at the origin. Should be an array
                 of shape `[2,]` in the format `[y, x]`.
         """
-        dx = jnp.atleast_1d(dx)
-        if dx.ndim == 1:
-            dx = jnp.stack([dx, dx])
-        assert_rank(dx, 2)  # dx should have shape (2, C) here
+        _dx = cls._normalize_dx(dx)
         spectrum = jnp.atleast_1d(spectrum)
         spectral_density = jnp.atleast_1d(spectral_density)
         assert_equal_shape([spectrum, spectral_density])
@@ -412,6 +434,8 @@ class ScalarField(Field):
         if u is None:
             assert shape is not None, "Must specify shape if u is None"
             u = jnp.empty((1, *shape, spectrum.size, 1), dtype=jnp.complex64)
+        else:
+            u = jnp.array(u)
         ndim = len(u.shape)
         assert ndim >= 5, (
             "Field must be Array with at least 5 dimensions: (B... H W C 1)."
@@ -427,19 +451,25 @@ class ScalarField(Field):
             origin = origin[:, None]
         assert_rank(origin, 2)  # origin should have shape (2, C) here
         assert origin.shape[0] == 2
-        return cls(u, dx, spectrum, spectral_density, origin)
+        return cls(u, _dx, spectrum, spectral_density, origin)
+
+    @override
+    def _check_shapes(self):
+        super()._check_shapes()
+        if self.u.shape[-1] != 1:
+            raise ValueError("last axis of u must have size 1 for ScalarField")
 
 
 class VectorField(Field):
     @classmethod
     def create(
         cls,
-        dx: ScalarLike,
-        spectrum: ScalarLike,
-        spectral_density: ScalarLike,
+        dx: ArrayLike,
+        spectrum: ArrayLike,
+        spectral_density: ArrayLike,
         u: Array | None = None,
         shape: tuple[int, int] | None = None,
-        origin: ArrayLike | None = None,
+        origin: JaxArrayLike | None = None,
     ) -> Field:
         """
         Create a vectorial ``Field`` object in a convenient way.
@@ -476,10 +506,7 @@ class VectorField(Field):
                 that is is no longer centered at the origin. Should be an array
                 of shape `[2,]` in the format `[y, x]`.
         """
-        dx = jnp.atleast_1d(dx)
-        if dx.ndim == 1:
-            dx = jnp.stack([dx, dx])
-        assert_rank(dx, 2)  # dx should have shape (2, C) here
+        _dx = cls._normalize_dx(dx)
         spectrum = jnp.atleast_1d(spectrum)
         spectral_density = jnp.atleast_1d(spectral_density)
         assert_equal_shape([spectrum, spectral_density])
@@ -502,7 +529,7 @@ class VectorField(Field):
             origin = origin[:, None]
         assert_rank(origin, 2)  # origin should have shape (2, C) here
         assert origin.shape[0] == 2
-        return cls(u, dx, spectrum, spectral_density, origin)
+        return cls(u, _dx, spectrum, spectral_density, origin)
 
     @property
     def jones_vector(self) -> Array:
@@ -510,6 +537,12 @@ class VectorField(Field):
         norm = jnp.linalg.norm(self.u, axis=-1, keepdims=True)
         norm = jnp.where(norm == 0, 1, norm)  # set to 1 to avoid division by zero
         return self.u / norm
+
+    @override
+    def _check_shapes(self):
+        super()._check_shapes()
+        if self.u.shape[-1] != 3:
+            raise ValueError("last axis of u must have size 3 for VectorField")
 
 
 def pad(field: Field, pad_width: int | tuple[int, int], cval: float = 0) -> Field:
@@ -546,7 +579,7 @@ def crop(field: Field, crop_width: int | tuple[int, int]) -> Field:
     return field.replace(u=field.u[tuple(crop)])
 
 
-def shift_grid(field: Field, shift_yx: ScalarLike) -> Field:
+def shift_grid(field: Field, shift_yx: ArrayLike) -> Field:
     """
     Shift the sampling grid by an arbitrary amount in y and x directions.
     Args:

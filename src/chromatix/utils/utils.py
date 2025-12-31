@@ -5,6 +5,18 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 
+def toarray(x: ArrayLike) -> np.ndarray | Array:
+    """Convert the argument to an array by calling the ``asarray`` function
+    of its corresponding namespace (e.g. ``numpy.asarray`` is used for numpy
+    arrays and ``jax.numpy.asarray`` for jax arrays). If the argument has no
+    array namespace (e.g. because it is a python object), it is converted
+    using ``jax.numpy.asarray``."""
+    if hasattr(x, "__array_namespace__"):
+        xp = x.__array_namespace__()  # type: ignore
+        return xp.asarray(x)
+    return np.asarray(x)
+
+
 def next_order(val: int) -> int:
     return int(2 ** np.ceil(np.log2(val)))
 

@@ -1,4 +1,7 @@
+from typing import TypeVar
 import jax.numpy as jnp
+import numpy as np
+from chromatix.utils.utils import toarray
 from einops import rearrange
 from jax import Array
 
@@ -10,9 +13,12 @@ __all__ = [
     "_broadcast_1d_to_innermost_batch",
     "_broadcast_1d_to_grid",
     "_broadcast_2d_to_grid",
-    "_squeeze_grid_to_2d",
+    "_squeeze_grid_to_3d",
     "_broadcast_2d_to_spatial",
 ]
+
+
+Tensor = TypeVar("Tensor", Array, np.ndarray)
 
 
 def _broadcast_1d_to_channels(x: ScalarLike, ndim: int) -> Array:
@@ -33,16 +39,18 @@ def _broadcast_1d_to_innermost_batch(x: ScalarLike, ndim: int) -> Array:
     return rearrange(jnp.atleast_1d(x), shape_spec)
 
 
-def _broadcast_1d_to_grid(x: ArrayLike | tuple[float, float], ndim: int) -> Array:
+def _broadcast_1d_to_grid(x: Tensor | ArrayLike, ndim: int) -> Tensor:
     """
     Broadcast 1D array of size `2` to `(2 B... H W C 1)`.
     Useful for vectorial ops on grids.
     """
     shape_spec = "d ->" + "d" + " 1" * (ndim - 4) + " 1 1 1 1"
-    return rearrange(jnp.atleast_1d(jnp.array(x)), shape_spec, d=2)
+    _x = toarray(x)
+    _x = _x.__array_namespace__().atleast_1d(_x)
+    return rearrange(_x, shape_spec, d=2)
 
 
-def _broadcast_2d_to_grid(x: Array, ndim: int) -> Array:
+def _broadcast_2d_to_grid(x: Tensor, ndim: int) -> Tensor:
     """
     Broadcast 2D array of shape `2 C` to `(2 B... H W C [1 | 3])`.
     Useful for vectorial ops on grids.
@@ -51,16 +59,16 @@ def _broadcast_2d_to_grid(x: Array, ndim: int) -> Array:
     return rearrange(x, shape_spec, d=2)
 
 
-def _squeeze_grid_to_2d(x: Array, ndim: int) -> Array:
+def _squeeze_grid_to_3d(x: Tensor, ndim: int) -> Tensor:
     """
-    Squeeze array of shape `(2 B... H W C [1 | 3])` to 2D array of shape `2 C`.
+    Squeeze array of shape `(2 B... H W C [1 | 3])` to 3D array of shape `2 C 1`.
     Useful for vectorial ops on grids.
     """
-    shape_spec = "d" + " 1" * (ndim - 4) + " 1 1 c 1 -> d c"
+    shape_spec = "d" + " 1" * (ndim - 4) + " 1 1 c 1 -> d c 1"
     return rearrange(x, shape_spec, d=2)
 
 
-def _broadcast_2d_to_spatial(x: Array, ndim: int) -> Array:
+def _broadcast_2d_to_spatial(x: Tensor, ndim: int) -> Tensor:
     """Broadcast 2D array of shape `(H W)` to `(B... H W C [1 | 3])`."""
     if x.ndim != ndim:
         shape_spec = "h w ->" + ("1 " * (ndim - 4)) + "h w 1 1"
