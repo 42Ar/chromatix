@@ -1,4 +1,4 @@
-from typing import TypeVar
+from typing import Union
 import jax.numpy as jnp
 import numpy as np
 from chromatix.utils.utils import toarray
@@ -18,7 +18,7 @@ __all__ = [
 ]
 
 
-Tensor = TypeVar("Tensor", Array, np.ndarray)
+Tensor = Union[Array | np.ndarray]
 
 
 def _broadcast_1d_to_channels(x: ScalarLike, ndim: int) -> Array:
