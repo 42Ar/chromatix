@@ -348,7 +348,7 @@ class Field(Raster):
         else:
             u = jnp.array(u)
         if origin is None:
-            _origin = jnp.zeros((2, 1))
+            _origin = np.zeros((2, 1))
         else:
             _origin = cls._normalize_origin(origin)
         # shape checking is implicitly done when the object is constructed
