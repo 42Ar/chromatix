@@ -27,7 +27,8 @@ def optical_fft(field: Field, z: ScalarLike, n: ScalarLike) -> Field:
         The propagated ``Field``, transformed by ``fft``/``ifft``.
     """
     L_sq = field.spectrum * z / n
-    du = field.dk * jnp.abs(L_sq)
+    du = field.dk * L_sq.__array_namespace__().abs(L_sq)
+
     # Forward transform normalization for z >= 0
     norm_fft = (z >= 0) * -1j * jnp.prod(field.dx, axis=0, keepdims=False) / L_sq
     # Inverse transform normalization for z < 0
