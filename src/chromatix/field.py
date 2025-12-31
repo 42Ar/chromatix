@@ -7,7 +7,7 @@ from jax.typing import ArrayLike as JaxArrayLike
 import jax.numpy as jnp
 import numpy as np
 from numpy.typing import ArrayLike
-from chex import assert_equal_shape, assert_rank
+from chex import assert_rank
 from chromatix.utils.shapes import (
     _broadcast_1d_to_channels,
     _broadcast_1d_to_grid,
@@ -34,7 +34,7 @@ class Raster(eqx.Module):
 
     Notes
     -----
-    The array ``_dx`` is can also be a numpy array, to enable certain
+    The array ``_dx`` can also be a numpy array, to enable certain
     precomputations (like Pupil masks) and assertions during compile time
     of jax. 
     """
@@ -42,7 +42,23 @@ class Raster(eqx.Module):
     u: Array  # (B... H W C...)
     _dx: Array | np.ndarray  # (2 D...)
 
+    @classmethod
+    def _normalize_dx(cls, dx: ArrayLike, channels_dims: int) -> Array | np.ndarray:
+        """Convert a scalar or an array to the shape ``(2, ...)`` where ``...``
+        are a number of axes that will be equal to ``channels_dims`` by appending
+        axes of length 1. If the array cannot be converted a ValueError is raised."""
+        _dx = toarray(dx)
+        xp = _dx.__array_namespace__()
+        if _dx.ndim == 0:
+            _dx = xp.full(2, _dx)
+        elif _dx.shape[0] != 2:
+            raise ValueError("first axis of _dx must have size 2")
+        if _dx.ndim > channels_dims + 1:
+            raise ValueError("provided _dx has to many dimensions")
+        return _dx[..., *[None]*(channels_dims + 1 - _dx.ndim)]
+
     def _check_shapes(self):
+        """Raises an error if invalid or inconsistent shapes are detected."""
         if self.ndim < 2:
             raise ValueError("cannot construct a Raster object with less than two dimensions")
         if self.n_batch_dims < 0:
@@ -230,30 +246,43 @@ class Field(Raster):
 
     Attributes
     ----------
-    _spectrum : jax.Array
-        Array of shape ``(C,)`` that stores the wavelengths of the field.
-    _spectral_density : jax.Array
+    _spectrum : jax.Array or np.ndarray
+        Array of shape ``(C,)`` or ``(1,)`` that stores the wavelengths of
+        the field.
+    _spectral_density : jax.Array or np.ndarray
         Weights associated with the wavelength in ``_spectrum``. Stored as
-        an array of shape ``(C,)``.
+        an array of shape ``(C,)`` or ``(1,)``.
+    _origin : jax.Array or np.ndarray
+        Defines a shift of the sampling grid relative to the Fourier origin.
+        Stored as an array of shape ``(2, C)`` or ``(2, 1)``.
     """
 
-    _spectrum: Array | np.ndarray  # (C)
-    _spectral_density: Array | np.ndarray # (C)
-    _origin: Array | np.ndarray  # (2 B... H W C [1 | 3])
+    _spectrum: Array | np.ndarray  # (C) or (1,)
+    _spectral_density: Array | np.ndarray # (C,) or (1,)
+    _origin: Array | np.ndarray  # (2, C) or (2, 1)
 
     @classmethod
-    def _normalize_dx(self, dx: ArrayLike) -> Array | np.ndarray:
-        _dx = toarray(dx)
-        xp = _dx.__array_namespace__()
-        if _dx.ndim == 0:
-            _dx = xp.full(2, _dx)
-        if _dx.ndim == 1:
-            _dx = _dx[..., None]  # add channel dim
-        if _dx.ndim == 2:
-            _dx = _dx[..., None]  # add vector dim
-        if _dx.shape != (2, 1, 1):
-            raise ValueError("unexpected shape of dx")
-        return _dx
+    def _normalize_spec_array(cls, spec: ArrayLike) -> Array | np.ndarray:
+        _spec = toarray(spec)
+        xp = _spec.__array_namespace__()
+        _spec = xp.atleast_1d(_spec)
+        if _spec.ndim != 1:
+            raise ValueError("spectrum and spectral_density must be 1d array")
+        return _spec
+    
+    @classmethod
+    def _normalize_origin(cls, origin: ArrayLike) -> Array | np.ndarray:
+        _origin = toarray(origin)
+        xp = _origin.__array_namespace__()
+        if _origin.ndim == 0:
+            _origin = xp.full(2, _origin)
+        elif _origin.shape[0] != 2:
+            raise ValueError("first axis of _origin must have size 2")
+        if _origin.ndim == 1:
+            _origin = _origin[:, None]
+        elif _origin.ndim != 2:
+            raise ValueError("_origin has an invalid number of axes")
+        return _origin
 
     @classmethod
     def empty_like(
@@ -263,50 +292,84 @@ class Field(Raster):
         shape: tuple[int, int] | None = None,
         spectrum: ArrayLike | None = None,
         spectral_density: ArrayLike | None = None,
+        origin: ArrayLike | None = None,
     ) -> Self:
         """
         Copy over attributes of ``field`` to a new ``Field`` object, with the
         option of changing some attributes.
 
-        Note that this function overwrites the field `u` with a new empty field.
+        Note that this function overwrites the field `u` with a new empty field
+        of same dtype, but with batch axes set to a size of 1.
         """
         if dx is None:
             _dx = field._dx
         else:
-            _dx = cls._normalize_dx(dx)
+            _dx = cls._normalize_dx(dx, 2)
         if shape is None:
             shape = field.spatial_shape
         else:
             assert len(shape) == 2
         if spectrum is None:
-            spectrum = field.spectrum
+            _spectrum = field._spectrum
         else:
-            spectrum = jnp.atleast_1d(spectrum)
+            _spectrum = cls._normalize_spec_array(spectrum)
         if spectral_density is None:
-            spectral_density = field.spectral_density
+            _spectral_density = field._spectral_density
         else:
-            spectral_density = jnp.atleast_1d(spectral_density)
+            _spectral_density = cls._normalize_spec_array(spectral_density)
         if origin is None:
-            origin = field.origin.squeeze()
+            _origin = field._origin
         else:
-            if isinstance(origin, Number):
-                origin = jnp.array([origin, origin])
-            origin = jnp.array(origin)
-        origin = origin[:, None]
-        assert_rank(origin, 2)
+            _origin = cls._normalize_origin(origin)
         u = jnp.empty(
-            (1, *shape, spectrum.size, field.u.shape[-1]), dtype=field.u.dtype
-        )
-        return cls(u, _dx, spectrum, spectral_density, origin)
+                (*[1]*field.n_batch_dims, *shape, *field.u.shape[-2:]), dtype=field.u.dtype)
+        return cls(u, _dx, _spectrum, _spectral_density, _origin)
+
+    @classmethod
+    def _create(
+        cls,
+        vector_axis_size: int,
+        dx: ArrayLike,
+        spectrum: ArrayLike,
+        spectral_density: ArrayLike,
+        u: ArrayLike | None = None,
+        shape: tuple[int, int] | None = None,
+        origin: ArrayLike | None = None,
+    ) -> Self:
+        """Refer to docstrings of callers."""
+        _dx = cls._normalize_dx(dx, 2)
+        _spectrum = cls._normalize_spec_array(spectrum)
+        _spectral_density = cls._normalize_spec_array(spectral_density)
+        _spectral_density = _spectral_density / _spectral_density.sum()
+        if u is None:
+            if shape is None or len(shape) != 2:
+                raise ValueError("must specify shape as a length 2 tuple if u is None")
+            u = jnp.zeros((1, *shape, len(_spectrum), vector_axis_size), dtype=jnp.complex64)
+        else:
+            u = jnp.array(u)
+        if origin is None:
+            _origin = jnp.zeros((2, 1))
+        else:
+            _origin = cls._normalize_origin(origin)
+        # shape checking is implicitly done when the object is constructed
+        return cls(u, _dx, _spectrum, _spectral_density, _origin)
 
     @override
     def _check_shapes(self):
         super()._check_shapes()
+        if self.u.ndim < 4:
+            raise ValueError("field must be an array with at least 4 dimensions: (B... H W C 1)")
         if self._dx.shape not in [(2, 1, 1), (2, self.u.shape[-2], 1)]:
-            raise ValueError(f"_dx has invalid shape for a Field (is {self._dx.shape})")
+            raise ValueError(f"_dx has invalid shape")
+        if self._spectrum.shape not in [(1,), (self.u.shape[-2])]:
+            raise ValueError(f"_spectrum has invalid shape")
+        if self._spectral_density.shape not in [(1,), (self.u.shape[-2])]:
+            raise ValueError(f"_spectrum has invalid shape")
+        if self._origin.shape not in [(2, 1), (2, self.u.shape[-2])]:
+            raise ValueError(f"_origin has invalid shape")
 
     @property
-    def origin(self) -> Array:
+    def origin(self) -> Array | np.ndarray:
         """
         The shift of the sampling place, such that it is no longer centered at
         the origin. Defined as an array of shape ``(2 1... 1 1 C 1)``
@@ -315,7 +378,7 @@ class Field(Raster):
         return _broadcast_2d_to_grid(self._origin, self.ndim)
 
     @property
-    def extent(self) -> Array:
+    def extent(self) -> Array | np.ndarray:
         """
         The extent (lengths in height and width per wavelength) of the field
         in units of distance. Defined as an array of shape ``(2 1... 1 1 C 1)``
@@ -326,14 +389,14 @@ class Field(Raster):
         return self.dx * shape
 
     @property
-    def spectrum(self) -> Array:
+    def spectrum(self) -> Array | np.ndarray:
         """
         Wavelengths sampled by the complex field, shape ``(1... 1 1 C 1)``.
         """
         return _broadcast_1d_to_channels(self._spectrum, self.ndim)
 
     @property
-    def spectral_density(self) -> Array:
+    def spectral_density(self) -> Array | np.ndarray:
         """
         Weights of wavelengths sampled by the complex field, shape ``(1... 1 1
         C 1)``.
@@ -392,66 +455,35 @@ class ScalarField(Field):
         origin: ArrayLike | None = None,
     ) -> Self:
         """
-        Create a scalar approximation ``Field`` object in a convenient way.
+        Create a ``ScalarField`` instance in a convenient way.
 
-        This class function appropriately reshapes the given values of
-        attributes to the necessary shapes, allowing a ``Field`` to be created
-        with scalar or 1D array values for the spectrum and spectral density,
-        as desired.
+        Parameters
+        ----------
+        dx : array_like
+            Sample spacing. Must be a scalar or an array with shape ``(2,)``,
+            ``(2, 1)``, or ``(2, 1, 1)``. See the ``Raster`` class for further details.
+        spectrum : array_like
+            Wavelengths sampled by the field. Must be a scalar or a one-dimensional
+            array of length ``C``.
+        spectral_density : array_like
+            Weights associated with the sampled wavelengths. Must be a scalar
+            or a one-dimensional array of length ``C``.
+        u : array_like, optional
+            Scalar field values with shape ``(B..., H, W, C, 1)``. If not provided,
+            the field is initialized with zeros using the specified ``shape``.
+        shape : tuple of int, optional
+            Spatial dimensions ``(H, W)`` of the field. Ignored if ``u`` is
+            provided. Required if ``u`` is not provided.
+        origin : array_like, optional
+            Offset of the sampling plane relative to the origin. Must have
+            shape ``(2,)``, ``(2, 1)`` or ``(2, C)``.
 
-        Args:
-            dx: The spacing of the samples in ``u`` discretizing a continuous
-                field. Can either be a 1D array with the same size as the
-                number of wavelengths in the spectrum of shape (C), specifying
-                a square spacing per wavelength, or a 2D array of shape (2 C)
-                specifying the spacing in the y and x directions respectively
-                for non-square pixels. A float can also be specified to use the
-                same square spacing for all wavelengths. Spacing will be the
-                same per wavelength for all entries in a batch.
-            spectrum: The wavelengths sampled by the field, in any units
-                specified. Should be a 1D array containing each wavelength, or
-                a float for a single wavelength.
-            spectral_density: The weights of the wavelengths in the spectrum.
-                Will be scaled to sum to 1.0 over all wavelengths. Should be a
-                1D array containing the weight of each wavelength, or a float
-                for a single wavelength.
-            u: The scalar field of shape `(B... H W C 1)`. If not given,
-                the ``Field`` is allocated with uninitialized values of the
-                given ``shape`` as `(1 H W C 1)`.
-            shape: A tuple defining the shape of only the spatial
-                dimensions of the ``Field`` of the form `(H W)`. Not required
-                if ``u`` is provided. If ``u`` is not provided, then ``shape``
-                must be provided.
-            origin: If provided, defines a shift in the sampling plane such
-                that is is no longer centered at the origin. Should be an array
-                of shape `[2,]` in the format `[y, x]`.
+        Returns
+        -------
+        ScalarField
+            A new instance with appropriately shaped internal arrays.
         """
-        _dx = cls._normalize_dx(dx)
-        spectrum = jnp.atleast_1d(spectrum)
-        spectral_density = jnp.atleast_1d(spectral_density)
-        assert_equal_shape([spectrum, spectral_density])
-        spectral_density = spectral_density / jnp.sum(spectral_density)
-        if u is None:
-            assert shape is not None, "Must specify shape if u is None"
-            u = jnp.empty((1, *shape, spectrum.size, 1), dtype=jnp.complex64)
-        else:
-            u = jnp.array(u)
-        ndim = len(u.shape)
-        assert ndim >= 5, (
-            "Field must be Array with at least 5 dimensions: (B... H W C 1)."
-        )
-        assert u.shape[-1] == 1, "Last dimension must be 1 for scalar fields."
-        if origin is None:
-            origin = jnp.zeros((2, 1))
-        elif isinstance(origin, tuple):
-            origin = jnp.array(origin)
-        elif isinstance(origin, Number):
-            origin = jnp.array([origin, origin])
-        if origin.ndim == 1:
-            origin = origin[:, None]
-        assert_rank(origin, 2)  # origin should have shape (2, C) here
-        assert origin.shape[0] == 2
-        return cls(u, _dx, spectrum, spectral_density, origin)
+        return cls._create(1, dx, spectrum, spectral_density, u, shape, origin)
 
     @override
     def _check_shapes(self):
@@ -461,75 +493,48 @@ class ScalarField(Field):
 
 
 class VectorField(Field):
+
     @classmethod
     def create(
         cls,
         dx: ArrayLike,
         spectrum: ArrayLike,
         spectral_density: ArrayLike,
-        u: Array | None = None,
+        u: ArrayLike | None = None,
         shape: tuple[int, int] | None = None,
-        origin: JaxArrayLike | None = None,
-    ) -> Field:
+        origin: ArrayLike | None = None,
+    ) -> Self:
         """
-        Create a vectorial ``Field`` object in a convenient way.
+        Create a ``VectorField`` instance in a convenient way.
 
-        This class function appropriately reshapes the given values of
-        attributes to the necessary shapes, allowing a ``Field`` to be created
-        with scalar or 1D array values for the spectrum and spectral density,
-        as desired.
+        Parameters
+        ----------
+        dx : array_like
+            Sample spacing. Must be a scalar or an array with shape ``(2,)``,
+            ``(2, 1)``, or ``(2, 1, 1)``. See the ``Raster`` class for further details.
+        spectrum : array_like
+            Wavelengths sampled by the field. Must be a scalar or a one-dimensional
+            array of length ``C``.
+        spectral_density : array_like
+            Weights associated with the sampled wavelengths. Must be a scalar
+            or a one-dimensional array of length ``C``.
+        u : array_like, optional
+            Vector field of shape ``(B..., H, W, C, 3)``. If not provided,
+            the field is initialized with zeros using the specified ``shape``.
+        shape : tuple of int, optional
+            Spatial dimensions ``(H, W)`` of the field. Ignored if ``u`` is
+            provided. Required if ``u`` is not provided.
+        origin : array_like, optional
+            Offset of the sampling plane relative to the origin. Must have
+            shape ``(2,)``, ``(2, 1)`` or ``(2, C)``.
 
-        Args:
-            dx: The spacing of the samples in ``u`` discretizing a continuous
-                field. Can either be a 1D array with the same size as the
-                number of wavelengths in the spectrum of shape (C), specifying
-                a square spacing per wavelength, or a 2D array of shape (2 C)
-                specifying the spacing in the y and x directions respectively
-                for non-square pixels. A float can also be specified to use the
-                same square spacing for all wavelengths. Spacing will be the
-                same per wavelength for all entries in a batch.
-            spectrum: The wavelengths sampled by the field, in any units
-                specified. Should be a 1D array containing each wavelength, or
-                a float for a single wavelength.
-            spectral_density: The weights of the wavelengths in the spectrum.
-                Will be scaled to sum to 1.0 over all wavelengths. Should be a
-                1D array containing the weight of each wavelength, or a float
-                for a single wavelength.
-            u: The vectorial field of shape `(B... H W C 3)`. If not given,
-                the ``Field`` is allocated with uninitialized values of the
-                given ``shape`` as `(1 H W C 3)`.
-            shape: A tuple defining the shape of only the spatial
-                dimensions of the ``Field`` of the form `(H W)`. Not required
-                if ``u`` is provided. If ``u`` is not provided, then ``shape``
-                must be provided.
-            origin: If provided, defines a shift in the sampling plane such
-                that is is no longer centered at the origin. Should be an array
-                of shape `[2,]` in the format `[y, x]`.
+        Returns
+        -------
+        VectorField
+            A new instance with appropriately shaped internal arrays.
         """
-        _dx = cls._normalize_dx(dx)
-        spectrum = jnp.atleast_1d(spectrum)
-        spectral_density = jnp.atleast_1d(spectral_density)
-        assert_equal_shape([spectrum, spectral_density])
-        spectral_density = spectral_density / jnp.sum(spectral_density)
-        if u is None:
-            assert shape is not None, "Must specify shape if u is None"
-            u = jnp.empty((1, *shape, spectrum.size, 3), dtype=jnp.complex64)
-        ndim = len(u.shape)
-        assert ndim >= 5, (
-            "Field must be Array with at least 5 dimensions: (B... H W C 3)."
-        )
-        assert u.shape[-1] == 3, "Last dimension must be 3 for vectorial fields."
-        if origin is None:
-            origin = jnp.zeros((2, 1))
-        elif isinstance(origin, tuple):
-            origin = jnp.array(origin)
-        elif isinstance(origin, Number):
-            origin = jnp.array([origin, origin])
-        if origin.ndim == 1:
-            origin = origin[:, None]
-        assert_rank(origin, 2)  # origin should have shape (2, C) here
-        assert origin.shape[0] == 2
-        return cls(u, _dx, spectrum, spectral_density, origin)
+        return cls._create(3, dx, spectrum, spectral_density, u, shape, origin)
+
 
     @property
     def jones_vector(self) -> Array:
