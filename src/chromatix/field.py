@@ -1,6 +1,6 @@
 import dataclasses
 import operator
-from typing import Self, override
+from typing import Self, override, TypeVar
 from jax import Array
 from jax._src.lax.control_flow.solves import _check_shapes
 from jax.typing import ArrayLike as JaxArrayLike
@@ -12,9 +12,14 @@ from chromatix.utils.shapes import (
     _broadcast_1d_to_channels,
     _broadcast_1d_to_grid,
     _broadcast_2d_to_grid,
+    _check_shape_and_expand_dims,
+    _broadcast_scalar_and_expand_dims
 )
 from chromatix.utils import create_grid, toarray
 import equinox as eqx
+
+
+SubclassesRaster = TypeVar("SubclassesRaster", bound="Raster")
 
 
 class Raster(eqx.Module):
@@ -44,18 +49,7 @@ class Raster(eqx.Module):
 
     @classmethod
     def _normalize_dx(cls, dx: ArrayLike, channels_dims: int) -> Array | np.ndarray:
-        """Convert a scalar or an array to the shape ``(2, ...)`` where ``...``
-        are a number of axes that will be equal to ``channels_dims`` by appending
-        axes of length 1. If the array cannot be converted a ValueError is raised."""
-        _dx = toarray(dx)
-        xp = _dx.__array_namespace__()
-        if _dx.ndim == 0:
-            _dx = xp.full(2, _dx)
-        elif _dx.shape[0] != 2:
-            raise ValueError("first axis of _dx must have size 2")
-        if _dx.ndim > channels_dims + 1:
-            raise ValueError("provided _dx has to many dimensions")
-        return _dx[..., *[None]*(channels_dims + 1 - _dx.ndim)]
+        return _broadcast_scalar_and_expand_dims(dx, channels_dims + 1, 2)
 
     def _check_shapes(self):
         """Raises an error if invalid or inconsistent shapes are detected."""
@@ -74,11 +68,15 @@ class Raster(eqx.Module):
     def __post_init__(self):
         self._check_shapes()
 
-    def replace(self, **changes):
+    def replace(self: SubclassesRaster, **changes) -> SubclassesRaster:
         result = dataclasses.replace(self, **changes)
         result._check_shapes()
         return result
     
+    @classmethod
+    def create_raster(cls, u: Array, dx: ArrayLike, channels_dims: int = 0) -> Self:
+        return cls(u, cls._normalize_dx(dx, channels_dims))
+
     @property
     def ndim(self) -> int:
         """Total number of axes of the data array"""
@@ -122,7 +120,7 @@ class Raster(eqx.Module):
     def __neg__(self):
         return self.replace(u=-self.u)
 
-    def _binary_op(self, operator, other: JaxArrayLike | Self, reverse: bool) -> Self:
+    def _binary_op(self: SubclassesRaster, operator, other: JaxArrayLike | "Raster", reverse: bool) -> SubclassesRaster:
         if isinstance(other, Raster):
             other = other.u
         elif not isinstance(other, (np.ndarray, Array, np.bool_, np.number, bool, int, float, complex)):
@@ -133,50 +131,50 @@ class Raster(eqx.Module):
             res = operator(self.u, other)            
         return self.replace(u=res)
         
-    def __add__(self, other: JaxArrayLike | Self) -> Self:
+    def __add__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
         return self._binary_op(operator.add, other, False)
 
-    def __radd__(self, other: JaxArrayLike | Self) -> Self:
+    def __radd__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.add, other, True)
 
-    def __sub__(self, other: JaxArrayLike | Self) -> Self:
+    def __sub__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
         return self._binary_op(operator.sub, other, False)
 
-    def __rsub__(self, other: JaxArrayLike | Self) -> Self:
+    def __rsub__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.sub, other, True)
 
-    def __mul__(self, other: JaxArrayLike | Self) -> Self:
+    def __mul__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
         return self._binary_op(operator.mul, other, False)
 
-    def __rmul__(self, other: JaxArrayLike | Self) -> Self:
+    def __rmul__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.mul, other, True)
 
-    def __truediv__(self, other: JaxArrayLike | Self) -> Self:
+    def __truediv__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
         return self._binary_op(operator.truediv, other, False)
 
-    def __rtruediv__(self, other: JaxArrayLike | Self) -> Self:
+    def __rtruediv__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.truediv, other, True)
 
-    def __floordiv__(self, other: JaxArrayLike | Self) -> Self:
+    def __floordiv__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
         return self._binary_op(operator.floordiv, other, False)
 
-    def __rfloordiv__(self, other: JaxArrayLike | Self) -> Self:
+    def __rfloordiv__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.floordiv, other, True)
 
-    def __mod__(self, other: JaxArrayLike | Self) -> Self:
+    def __mod__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
         return self._binary_op(operator.mod, other, False)
 
-    def __rmod__(self, other: JaxArrayLike | Self) -> Self:
+    def __rmod__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.mod, other, True)
 
-    def __pow__(self, other: JaxArrayLike | Self) -> Self:
+    def __pow__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
         return self._binary_op(operator.pow, other, False)
 
-    def __rpow__(self, other: JaxArrayLike | Self) -> Self:
+    def __rpow__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.pow, other, True)
 
     @property
-    def conj(self) -> Self:
+    def conj(self: SubclassesRaster) -> SubclassesRaster:
         return self.replace(u=jnp.conj(self.u))
 
     @property
@@ -267,22 +265,12 @@ class Field(Raster):
         xp = _spec.__array_namespace__()
         _spec = xp.atleast_1d(_spec)
         if _spec.ndim != 1:
-            raise ValueError("spectrum and spectral_density must be 1d array")
+            raise ValueError("spectrum and spectral_density must be 1d arrays or scalars")
         return _spec
     
     @classmethod
     def _normalize_origin(cls, origin: ArrayLike) -> Array | np.ndarray:
-        _origin = toarray(origin)
-        xp = _origin.__array_namespace__()
-        if _origin.ndim == 0:
-            _origin = xp.full(2, _origin)
-        elif _origin.shape[0] != 2:
-            raise ValueError("first axis of _origin must have size 2")
-        if _origin.ndim == 1:
-            _origin = _origin[:, None]
-        elif _origin.ndim != 2:
-            raise ValueError("_origin has an invalid number of axes")
-        return _origin
+        return _check_shape_and_expand_dims(origin, 2, (2,))
 
     @classmethod
     def empty_like(

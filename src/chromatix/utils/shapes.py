@@ -14,6 +14,8 @@ __all__ = [
     "_broadcast_2d_to_grid",
     "_squeeze_grid_to_3d",
     "_broadcast_2d_to_spatial",
+    "_check_shape_and_expand_dims",
+    "_broadcast_scalar_and_expand_dims"
 ]
 
 
@@ -78,3 +80,26 @@ def _broadcast_2d_to_spatial(x: Tensor, ndim: int) -> Tensor:
         shape_spec = "h w ->" + ("1 " * (ndim - 4)) + "h w 1 1"
         return rearrange(x, shape_spec)
     return x
+
+
+def _check_shape_and_expand_dims(x: ArrayLike, dims: int, shape: tuple[int, ...]) -> Array | np.ndarray:
+    """Raises a ``ValueError`` if the shape of ``x`` does not start with ``shape``.
+    Returns an array of a rank equal to ``dims`` by appending axes of size 1. If
+    the provided array has a rank exceeding ``dims`` a ``ValueError`` is raised."""
+    _x = toarray(x)
+    if _x.shape[:len(shape)] != shape:
+        raise ValueError(f"array has invalid shape: must start with {shape} but has {_x.shape}")
+    if _x.ndim > dims:
+        raise ValueError("provided array has to many axes")
+    return _x[..., *[None]*(dims - _x.ndim)]
+
+
+def _broadcast_scalar_and_expand_dims(x: ArrayLike, dims: int, n: int) -> Array | np.ndarray:
+    """Convert ``x`` to an array of shape ``(n, ...)`` with a rank of ``dims`` by
+    appending axes of size 1. Scalars are broadcasted; arrays must have size ``n``
+    of the first dimension. If the array has an invalid shape a ValueError is raised."""
+    _x = toarray(x)
+    xp = _x.__array_namespace__()
+    if _x.ndim == 0:
+        _x = xp.full(n, _x)
+    return _check_shape_and_expand_dims(_x, dims, (n,))
