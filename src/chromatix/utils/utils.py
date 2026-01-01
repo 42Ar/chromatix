@@ -16,6 +16,14 @@ def toarray(x: ArrayLike) -> np.ndarray | Array:
         return xp.asarray(x)
     return np.asarray(x)
 
+def common_namespace(*x: ArrayLike):
+    """Find a common namespace for the arguments. If all args are python objects,
+    or if no arguments are specified, return the numpy namespace. In particular,
+    this method returns ``jax.numpy`` if any of the objects is a jax array."""
+    # hack sum over zero length arrays of different namespace
+    # the "dominating" namespace will be the namespace of the result
+    testarray = sum((toarray(xx).__array_namespace__().zeros((0,)) for xx in x), np.zeros((0,)))
+    return testarray.__array_namespace__()
 
 def next_order(val: int) -> int:
     return int(2 ** np.ceil(np.log2(val)))
