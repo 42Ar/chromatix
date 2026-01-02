@@ -448,8 +448,9 @@ class ScalarField(Field):
         Parameters
         ----------
         dx : array_like
-            Sample spacing. Must be a scalar or an array with shape ``(2,)``,
-            ``(2, 1)``, or ``(2, 1, 1)``. See the ``Raster`` class for further details.
+            Sample spacing. Must be a scalar or an array with shape ``(2,)``, or shape
+            broadcastable to ``(2, C)`` or ``(2, C, 1)``. See the ``Raster`` class
+            for further details.
         spectrum : array_like
             Wavelengths sampled by the field. Must be a scalar or a one-dimensional
             array of length ``C``.
@@ -498,8 +499,9 @@ class VectorField(Field):
         Parameters
         ----------
         dx : array_like
-            Sample spacing. Must be a scalar or an array with shape ``(2,)``,
-            ``(2, 1)``, or ``(2, 1, 1)``. See the ``Raster`` class for further details.
+            Sample spacing. Must be a scalar or an array with shape ``(2,)``, or shape
+            broadcastable to ``(2, C)`` or ``(2, C, 3)``. See the ``Raster`` class
+            for further details.
         spectrum : array_like
             Wavelengths sampled by the field. Must be a scalar or a one-dimensional
             array of length ``C``.
