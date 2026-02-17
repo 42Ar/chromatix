@@ -538,7 +538,7 @@ def compute_asm_propagator(
         )
         k_max = k_width / 2
         # obtain rect filter to bandlimit (Eq. 23)
-        H_filter_yx = jnp.abs(field.k_grid - k0) <= k_max
+        H_filter_yx = jnp.abs((field.k_grid - kykx) - k0) <= k_max
         H_filter = H_filter_yx[0] * H_filter_yx[1]
         # apply filter
         kernel_field = kernel_field * H_filter
