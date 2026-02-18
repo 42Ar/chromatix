@@ -1,4 +1,5 @@
 import dataclasses
+from numbers import Number
 import operator
 from typing import Self, override, TypeVar
 from jax import Array
