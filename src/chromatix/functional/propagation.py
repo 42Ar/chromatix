@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Iterable
 
 import jax
 import jax.numpy as jnp
@@ -23,9 +23,11 @@ __all__ = [
     "transform_propagate_sas",
     "transfer_propagate",
     "asm_propagate",
+    "asm_propagate_multi_media",
     "kernel_propagate",
     "compute_transfer_propagator",
     "compute_asm_propagator",
+    "compute_asm_propagator_multi_media",
     "compute_padding_transform",
     "compute_padding_transfer",
     "compute_padding_exact",
@@ -341,6 +343,84 @@ def asm_propagate(
     return field
 
 
+def asm_propagate_multi_media(
+    field: Field,
+    z: Iterable[float],
+    n: Iterable[float],
+    N_pad: int,
+    cval: float = 0,
+    absorbing_boundary: Literal["tukey", "super_gaussian"] | None = None,
+    absorbing_boundary_width: float = 0.65,
+    kykx: ArrayLike | tuple[float, float] = (0.0, 0.0),
+    remove_evanescent: bool = False,
+    bandlimit: bool = False,
+    shift_yx: ArrayLike | tuple[float, float] = (0.0, 0.0),
+    output_dx: ArrayLike | None = None,
+    output_shape: tuple[int, int] = None,
+    use_czt: bool = True,
+    mode: Literal["full", "same"] = "full",
+) -> Field:
+    """
+    Propagate ``field`` through multiple media layers using the angular spectrum method.
+
+    This function accumulates the phase across multiple distances (z) and refractive 
+    indices (n) before applying the propagation kernel.
+
+    Args:
+        field: ``Field`` to be propagated.
+        z: Iterable of distances (e.g. [z1, z2]) for each layer.
+        n: Iterable of refractive indices (e.g. [n1, n2]) for each layer.
+        N_pad: Integer defining the pad length for the propagation FFT.
+        cval: Background value for padding. Defaults to 0.
+        absorbing_boundary: Optional absorbing boundary condition ("tukey" or "super_gaussian").
+        absorbing_boundary_width: Diameter percentage permitted without absorption.
+        kykx: Orientation of the propagation [ky, kx].
+        remove_evanescent: If ``True``, removes waves evanescent in ANY of the layers.
+        bandlimit: If ``True``, bandlimits based on total physical distance.
+        shift_yx: Shift in the destination plane [y, x].
+        output_dx: Different output sampling at the output plane.
+        output_shape: Output shape of the field.
+        use_czt: Whether to use Chirp Z-Transform for resampling.
+        mode: "full" (includes padding) or "same" (crops back to original shape).
+    """
+    # 1. Pad the field
+    field = pad(field, N_pad, cval=cval)
+    
+    # 2. Determine if CZT is needed, didn't test this, don't use before testing
+    if output_dx is None and output_shape is None:
+        use_czt = False
+        
+    # 3. Compute the multi-media kernel
+    # This uses the phase-accumulation logic we built
+    propagator = compute_asm_propagator_multi_media(
+        field,
+        z,
+        n,
+        kykx,
+        bandlimit,
+        shift_yx if not use_czt else (0.0, 0.0),
+        remove_evanescent=remove_evanescent,
+    )
+    
+    # 4. Apply the kernel via the standard propagation engine
+    field = kernel_propagate(
+        field,
+        propagator,
+        absorbing_boundary=absorbing_boundary,
+        absorbing_boundary_width=absorbing_boundary_width,
+        output_dx=output_dx,
+        output_shape=output_shape,
+        shift_yx=shift_yx,
+        use_czt=use_czt,
+    )
+    
+    # 5. Crop if requested
+    if mode == "same":
+        field = crop(field, N_pad)
+        
+    return field
+
+
 def kernel_propagate(
     field: Field,
     propagator: ArrayLike,
@@ -544,6 +624,101 @@ def compute_asm_propagator(
         kernel_field = kernel_field * H_filter
     return jnp.fft.ifftshift(kernel_field, axes=field.spatial_dims)
 
+
+def compute_asm_propagator_multi_media(
+    field: ScalarField | VectorField,
+    z: Iterable[float],
+    n: Iterable[float],
+    kykx: ArrayLike | tuple[float, float] = (0.0, 0.0),
+    bandlimit: bool = False,
+    shift_yx: ArrayLike | tuple[float, float] = (0.0, 0.0),
+    remove_evanescent: bool = False,
+) -> jnp.ndarray:
+    """
+    Compute a multi-layer propagation kernel by accumulating phase across media.
+    
+    Args:
+        field: ``Field`` to be propagated.
+        z: Iterable of distances for each layer.
+        n: Iterable of refractive indices for each layer.
+        kykx: Defines the orientation of the propagation [ky, kx].
+        bandlimit: If True, applies Matsushima-Shimobaba bandlimiting based on total distance.
+        shift_yx: Shift in the final destination plane [y, x].
+        remove_evanescent: If True, masks out waves that are evanescent in ANY layer.
+    """
+    # 1. Type and Length Validation
+    if not isinstance(z, Iterable) or not isinstance(n, Iterable):
+        raise TypeError("z and n must be iterables (list, tuple, or jnp.array).")
+    
+    z_list = jnp.atleast_1d(jnp.array(z))
+    n_list = jnp.atleast_1d(jnp.array(n))
+    
+    if z_list.shape[0] != n_list.shape[0]:
+        raise ValueError(f"Length of z ({len(z_list)}) must match length of n ({len(n_list)}).")
+
+    # 2. Pre-processing and Broadcasting
+    kykx = _broadcast_1d_to_grid(kykx, field.ndim)
+    shift_yx = _broadcast_1d_to_grid(shift_yx, field.ndim)
+    
+    # Calculate relative k-grid magnitude squared
+    # l2_sq_norm(field.k_grid - kykx)
+    k_sq_mag = jnp.sum((field.k_grid - kykx)**2, axis=0)
+    
+    total_accumulated_phase = jnp.zeros(field.shape, dtype=jnp.complex64)
+    combined_evanescent_mask = jnp.ones(field.shape, dtype=jnp.bool_)
+    total_z_abs = 0.0
+
+    # 3. Accumulated Loop (Unrolled by JIT)
+    for zi, ni in zip(z_list, n_list):
+        # We need to broadcast zi for batching if necessary
+        zi_b = _broadcast_1d_to_innermost_batch(zi, field.ndim)
+        total_z_abs += jnp.abs(zi)
+        
+        # Propagation term: sqrt(1 - (lambda/ni)^2 * |k|^2)
+        # field.spectrum is lambda_0
+        kernel_term = 1 - (field.spectrum / ni) ** 2 * k_sq_mag
+        
+        if remove_evanescent:
+            # Frequency is evanescent if kernel_term < 0
+            current_mask = kernel_term >= 0
+            combined_evanescent_mask = jnp.logical_and(combined_evanescent_mask, current_mask)
+            delay = jnp.sqrt(jnp.maximum(kernel_term, 0.0))
+        else:
+            delay = jnp.sqrt(jnp.complex64(kernel_term))
+            
+        # Accumulate phase: phi = 2pi * (z * n / lambda) * delay
+        layer_phase = 2 * jnp.pi * (jnp.abs(zi_b) * ni / field.spectrum) * delay
+        total_accumulated_phase += layer_phase
+
+    # 4. Final Output Plane Adjustments
+    out_shift = 2 * jnp.pi * jnp.sum(field.k_grid * shift_yx, axis=0)
+    final_phase = total_accumulated_phase + out_shift
+    
+    # Apply directionality (forward or backward propagation)
+    # Note: Using the sign of the first z or a combined sign logic
+    # Here we assume if total z sum is positive, we use exp(1j * phase)
+    # Most multi-layer setups propagate in one direction.
+    z_sum = jnp.sum(z_list)
+    kernel_field = jnp.where(z_sum >= 0, jnp.exp(1j * final_phase), jnp.conj(jnp.exp(1j * final_phase)))
+
+    # Apply global evanescent mask if requested
+    if remove_evanescent:
+        kernel_field = kernel_field * combined_evanescent_mask
+
+    # 5. Bandlimiting (Based on total physical distance)
+    if bandlimit:
+        # We use total_z_abs to calculate the frequency cutoff
+        k_limit_p = ((shift_yx + 1 / (2 * field.dk)) ** (-2) * total_z_abs**2 + 1) ** (-1 / 2) / field.spectrum
+        k_limit_n = ((shift_yx - 1 / (2 * field.dk)) ** (-2) * total_z_abs**2 + 1) ** (-1 / 2) / field.spectrum
+        
+        k0 = 0.5 * (jnp.sign(shift_yx + field.extent) * k_limit_p + jnp.sign(shift_yx - field.extent) * k_limit_n)
+        k_max = 0.5 * (jnp.sign(shift_yx + field.extent) * k_limit_p - jnp.sign(shift_yx - field.extent) * k_limit_n)
+        
+        H_filter_yx = jnp.abs(field.k_grid - k0) <= k_max
+        H_filter = H_filter_yx[0] * H_filter_yx[1]
+        kernel_field *= H_filter
+
+    return jnp.fft.ifftshift(kernel_field, axes=field.spatial_dims)
 
 def compute_padding_transform(height: int, spectrum: float, dx: float, z: float) -> int:
     """
