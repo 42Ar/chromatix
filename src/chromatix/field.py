@@ -1,9 +1,8 @@
 import dataclasses
 from numbers import Number
 import operator
-from typing import Self, override, TypeVar
+from typing import Self, override, TypeVar, Union
 from jax import Array
-from jax._src.lax.control_flow.solves import _check_shapes
 from jax.typing import ArrayLike as JaxArrayLike
 import jax.numpy as jnp
 import numpy as np
@@ -21,6 +20,7 @@ import equinox as eqx
 
 
 SubclassesRaster = TypeVar("SubclassesRaster", bound="Raster")
+RasterLike = Union[JaxArrayLike, "Raster"]
 
 
 class Raster(eqx.Module):
@@ -121,7 +121,7 @@ class Raster(eqx.Module):
     def __neg__(self):
         return self.replace(u=-self.u)
 
-    def _binary_op(self: SubclassesRaster, operator, other: JaxArrayLike | "Raster", reverse: bool) -> SubclassesRaster:
+    def _binary_op(self: SubclassesRaster, operator, other: RasterLike, reverse: bool) -> SubclassesRaster:
         if isinstance(other, Raster):
             other = other.u
         elif not isinstance(other, (np.ndarray, Array, np.bool_, np.number, bool, int, float, complex)):
@@ -132,43 +132,43 @@ class Raster(eqx.Module):
             res = operator(self.u, other)            
         return self.replace(u=res)
         
-    def __add__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
+    def __add__(self: SubclassesRaster, other: RasterLike) -> SubclassesRaster:
         return self._binary_op(operator.add, other, False)
 
     def __radd__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.add, other, True)
 
-    def __sub__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
+    def __sub__(self: SubclassesRaster, other: RasterLike) -> SubclassesRaster:
         return self._binary_op(operator.sub, other, False)
 
     def __rsub__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.sub, other, True)
 
-    def __mul__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
+    def __mul__(self: SubclassesRaster, other: RasterLike) -> SubclassesRaster:
         return self._binary_op(operator.mul, other, False)
 
     def __rmul__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.mul, other, True)
 
-    def __truediv__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
+    def __truediv__(self: SubclassesRaster, other: RasterLike) -> SubclassesRaster:
         return self._binary_op(operator.truediv, other, False)
 
     def __rtruediv__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.truediv, other, True)
 
-    def __floordiv__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
+    def __floordiv__(self: SubclassesRaster, other: RasterLike) -> SubclassesRaster:
         return self._binary_op(operator.floordiv, other, False)
 
     def __rfloordiv__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.floordiv, other, True)
 
-    def __mod__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
+    def __mod__(self: SubclassesRaster, other: RasterLike) -> SubclassesRaster:
         return self._binary_op(operator.mod, other, False)
 
     def __rmod__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
         return self._binary_op(operator.mod, other, True)
 
-    def __pow__(self: SubclassesRaster, other: JaxArrayLike | "Raster") -> SubclassesRaster:
+    def __pow__(self: SubclassesRaster, other: RasterLike) -> SubclassesRaster:
         return self._binary_op(operator.pow, other, False)
 
     def __rpow__(self: SubclassesRaster, other: JaxArrayLike) -> SubclassesRaster:
